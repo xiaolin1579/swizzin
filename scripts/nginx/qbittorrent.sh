@@ -14,7 +14,7 @@ location /qbittorrent.downloads {
 
   location ~* \.php\$ {
 
-  } 
+  }
 }
 DIN
 fi
@@ -29,25 +29,19 @@ location /qbittorrent/ {
     proxy_pass              http://$remote_user.qbittorrent;
     proxy_http_version      1.1;
     proxy_set_header        X-Forwarded-Host        $http_host;
-    http2_push_preload on; # Enable http2 push
+    http2_push_preload on;
     auth_basic "What's the password?";
-
     auth_basic_user_file /etc/htpasswd;
+
+    # รองรับการ Rewrite สำหรับทุกเวอร์ชัน
     rewrite ^/qbittorrent/(.*) /$1 break;
     proxy_cookie_path / "/qbittorrent/; Secure";
 
-    # The following directives effectively nullify Cross-site request forgery (CSRF)
-    # protection mechanism in qBittorrent, only use them when you encountered connection problems.
-    # You should consider disable "Enable Cross-site request forgery (CSRF) protection"
-    # setting in qBittorrent instead of using these directives to tamper the headers.
-    # The setting is located under "Options -> WebUI tab" in qBittorrent since v4.1.2.
-    #proxy_hide_header       Referer;
-    #proxy_hide_header       Origin;
-    #proxy_set_header        Referer                 '';
-    #proxy_set_header        Origin                  '';
-
-    # Not needed since qBittorrent v4.1.0
-    #add_header              X-Frame-Options         "SAMEORIGIN";
+    # การจัดการ CSRF สำหรับเวอร์ชัน 4.1.x ถึง 5.2.x
+    # สำหรับเวอร์ชันใหม่ๆ (5.x) แนะนำให้ไปปิด "Enable Cross-site request forgery (CSRF) protection"
+    # ในหน้า WebUI Options ของ qBittorrent แทนการใช้ proxy_hide_header
+    proxy_set_header   Referer            "";
+    proxy_set_header   Origin             "";
 }
 QBTN
 fi
