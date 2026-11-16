@@ -631,6 +631,16 @@ function build_qbittorrent() {
         echo_info "Applying security patch for qBittorrent 4.6.7"
         curl -s https://github.com/qbittorrent/qBittorrent/commit/91943e4815ae40a273b39432340357a4ce879f3b.patch | git apply -v >> $log 2>&1
     fi
+    case $VERSION in
+        5.3.*)
+            echo_info "Enabling automatic user disk quota detection"
+            cp /etc/swizzin/sources/patches/qbittorrent/swizzinquota.h src/base/utils/ &&
+                patch -p1 < /etc/swizzin/sources/patches/qbittorrent/quota-5.3.patch >> "$log" 2>&1 || {
+                echo_error "Could not apply the qBittorrent disk quota patch. Setup will not proceed"
+                exit 1
+            }
+            ;;
+    esac
     booststrap
     case $build_type in
         cmake)

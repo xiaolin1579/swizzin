@@ -66,6 +66,21 @@ Want something a bit more complex, specify package install variables, don't want
 bash <(curl -sL git.io/swizzin) --env /path/to/your/env/file/here.env
 ```
 
+### qBittorrent user disk quota
+
+Source builds of qBittorrent 5.3 include automatic Linux user quota detection in the standard WebUI status bar. It displays `Quota: used / limit | Free: remaining` when the process user has a block quota on the default save filesystem, or `Disk: used / total | Free: available` when the quota is unlimited, unavailable, or unsupported. No panel, extra backend, or root privileges are required.
+
+The lower nonzero soft/hard block limit is used. Available space never exceeds the physical disk's available space and cannot become negative. Usage includes all files owned by the user on that filesystem. This displays existing user quotas; it does not enable or change quotas, and does not read group/project quotas.
+
+Existing installations need a source rebuild, for example `sudo QBITTORRENT_VERSION=5.3.0 box upgrade qbittorrent`. Repository packages and alternative WebUIs are not modified. Hard-refresh the browser (Ctrl+F5) after upgrading. Category-specific save paths on other filesystems are not shown by the default-save-path status bar.
+
+Quota calculation regression test (no root required):
+
+```bash
+g++ -std=c++20 -Wall -Wextra -Werror -I. tests/test_qbittorrent_quota.cpp -o /tmp/test_qbittorrent_quota
+/tmp/test_qbittorrent_quota
+```
+
 ### Supported Operating Systems
 
 Long-term support branches only:

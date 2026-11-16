@@ -1,0 +1,122 @@
+--- a/src/base/utils/fs.cpp
++++ b/src/base/utils/fs.cpp
+@@ -312,17 +312,21 @@
+ 
+ qint64 Utils::Fs::freeDiskSpaceOnPath(const Path &path)
+ {
++    return diskSpaceInfo(path).available;
++}
++
++Swizzin::StorageSpace Utils::Fs::diskSpaceInfo(const Path &path)
++{
+     Path usedPath = path;
+-    qint64 freeSpace = -1;
+-    // For non-existent directories (which will be created on demand) `QStorageInfo::bytesAvailable()`
+-    // will return invalid value so instead query its parent/ancestor paths
+-    while ((freeSpace < 0) && !usedPath.isEmpty())
+-    {
+-        freeSpace = QStorageInfo(usedPath.data()).bytesAvailable();
++    // A new save directory may not exist yet. Use its nearest existing ancestor.
++    while (!usedPath.isEmpty())
++    {
++        const QStorageInfo storage(usedPath.data());
++        if (storage.bytesAvailable() >= 0)
++            return Swizzin::quotaAwareSpace(storage.device().constData(), storage.bytesAvailable(), storage.bytesTotal());
+         usedPath = usedPath.parentPath();
+     }
+-
+-    return freeSpace;
++    return {};
+ }
+ 
+ Path Utils::Fs::tempPath()
+--- a/src/base/utils/fs.h
++++ b/src/base/utils/fs.h
+@@ -35,6 +35,8 @@
+ 
+ #include <QString>
+ 
++#include "swizzinquota.h"
++
+ #include "base/3rdparty/expected.hpp"
+ #include "base/global.h"
+ #include "base/pathfwd.h"
+@@ -46,6 +48,7 @@
+ {
+     qint64 computePathSize(const Path &path);
+     qint64 freeDiskSpaceOnPath(const Path &path);
++    Swizzin::StorageSpace diskSpaceInfo(const Path &path);
+ 
+     bool isValidFileName(QStringView name);
+     bool isRegularFile(const Path &path);
+--- a/src/webui/api/synccontroller.cpp
++++ b/src/webui/api/synccontroller.cpp
+@@ -47,6 +47,8 @@
+ #include "base/net/geoipmanager.h"
+ #include "base/net/reverseresolution.h"
+ #include "base/preferences.h"
++#include "base/path.h"
++#include "base/utils/fs.h"
+ #include "base/utils/dict.h"
+ #include "base/utils/string.h"
+ #include "apierror.h"
+@@ -54,6 +56,19 @@
+ 
+ namespace
+ {
++    void updateStorageSpace(QVariantMap &state)
++    {
++        const auto space = Utils::Fs::diskSpaceInfo(BitTorrent::Session::instance()->savePath());
++        state[u"free_space_on_disk"_s] = static_cast<qlonglong>(space.available);
++        state[u"swizzin_storage"_s] = QVariantMap
++        {
++            {u"mode"_s, space.quota ? u"quota"_s : u"disk"_s},
++            {u"used"_s, static_cast<qlonglong>(space.used)},
++            {u"total"_s, static_cast<qlonglong>(space.total)},
++            {u"free"_s, static_cast<qlonglong>(space.available)}
++        };
++    }
++
+     // Sync main data keys
+     const QString KEY_SYNC_MAINDATA_QUEUEING = u"queueing"_s;
+     const QString KEY_SYNC_MAINDATA_REFRESH_INTERVAL = u"refresh_interval"_s;
+@@ -582,6 +597,7 @@
+ 
+     m_maindataSnapshot.serverState = getTransferInfo();
+     m_maindataSnapshot.serverState[KEY_TRANSFER_FREESPACEONDISK] = m_freeDiskSpace;
++    updateStorageSpace(m_maindataSnapshot.serverState);
+     m_maindataSnapshot.serverState[KEY_SYNC_MAINDATA_QUEUEING] = session->isQueueingSystemEnabled();
+     m_maindataSnapshot.serverState[KEY_SYNC_MAINDATA_REFRESH_INTERVAL] = session->refreshInterval();
+     m_maindataSnapshot.serverState[KEY_SYNC_MAINDATA_SESSION_STATE] = session->isPaused();
+@@ -739,6 +755,7 @@
+ 
+     QVariantMap serverState = getTransferInfo();
+     serverState[KEY_TRANSFER_FREESPACEONDISK] = m_freeDiskSpace;
++    updateStorageSpace(serverState);
+     serverState[KEY_SYNC_MAINDATA_QUEUEING] = session->isQueueingSystemEnabled();
+     serverState[KEY_SYNC_MAINDATA_REFRESH_INTERVAL] = session->refreshInterval();
+     serverState[KEY_SYNC_MAINDATA_SESSION_STATE] = session->isPaused();
+--- a/src/webui/www/private/scripts/client.js
++++ b/src/webui/www/private/scripts/client.js
+@@ -1255,7 +1255,20 @@
+ 
+         document.title = titlePrefix + window.qBittorrent.Client.mainTitle();
+ 
+-        document.getElementById("freeSpaceOnDisk").textContent = "QBT_TR(Free space: %1)QBT_TR[CONTEXT=HttpServer]".replace("%1", window.qBittorrent.Misc.friendlyUnit(serverState.free_space_on_disk));
++        const storage = serverState.swizzin_storage;
++        const freeSpaceElement = document.getElementById("freeSpaceOnDisk");
++        if (storage && (storage.free >= 0) && (storage.total >= 0)) {
++            const label = (storage.mode === "quota") ? "Quota" : "Disk";
++            const unit = window.qBittorrent.Misc.friendlyUnit;
++            freeSpaceElement.textContent = `${label}: ${unit(storage.used)} / ${unit(storage.total)} | Free: ${unit(storage.free)}`;
++            freeSpaceElement.title = (storage.mode === "quota")
++                ? "User quota on the default save filesystem. Free space is capped by physical disk availability."
++                : "Physical disk space on the default save filesystem.";
++        }
++        else {
++            freeSpaceElement.textContent = "QBT_TR(Free space: %1)QBT_TR[CONTEXT=HttpServer]".replace("%1", window.qBittorrent.Misc.friendlyUnit(serverState.free_space_on_disk));
++            freeSpaceElement.title = "";
++        }
+ 
+         const externalIPsElement = document.getElementById("externalIPs");
+         if (window.qBittorrent.Cache.preferences.get().status_bar_external_ip) {
