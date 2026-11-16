@@ -87,6 +87,8 @@ g++ -std=c++14 -Wall -Wextra -Werror -I. tests/test_qbittorrent_quota.cpp -o /tm
 
 Deluge 2.x installs, upgrades, and new users automatically enable the bundled `SwizzinQuota` plugin. The existing WebUI space indicator switches between `Quota: used / limit | Free: remaining` and `Disk: used / total | Free: available`. The daemon reads its own user's Linux block quota on the download filesystem, without root privileges or a separate backend. The lower nonzero soft/hard limit is used, and remaining space is capped by physical disk availability. Unlimited, unsupported, or unreadable user quotas fall back to disk space. Group/project quotas are not read or configured.
 
+Browser/API compatibility tests pass on Deluge 2.0.5, 2.1.1, Ubuntu's 2.1.2.dev0 package, and 2.2.0 with Python 3.12.
+
 For an existing Deluge 2.x installation, enable the plugin without rebuilding Deluge (run as root):
 
 ```bash
