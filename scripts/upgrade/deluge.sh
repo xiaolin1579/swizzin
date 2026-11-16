@@ -71,6 +71,15 @@ for u in "${users[@]}"; do
     echo_progress_start "Running ltconfig check ..."
     ltconfig
     echo_progress_done
-    systemctl try-restart deluged@${u}
-    systemctl try-restart deluge-web@${u}
 done
+
+# The 2.x plugin installer restarts active services after all config changes.
+deluge_quota_plugin || exit 1
+case $(deluged --version 2> /dev/null | awk '$1 == "deluged" {print $2}') in
+    1.*)
+        for u in "${users[@]}"; do
+            systemctl try-restart deluged@${u}
+            systemctl try-restart deluge-web@${u}
+        done
+        ;;
+esac

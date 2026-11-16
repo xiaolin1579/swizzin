@@ -615,6 +615,62 @@ DHL
     done
 }
 
+function deluge_quota_plugin() {
+    local quota_version quota_tmp quota_user quota_result daemon_active web_active
+    quota_version=$(deluged --version 2> /dev/null | awk '$1 == "deluged" {print $2}')
+    case $quota_version in
+        2.*) ;;
+        1.*)
+            echo_info "Automatic disk quota display requires Deluge 2.x. Keeping the existing WebUI display."
+            return 0
+            ;;
+        *)
+            echo_error "Could not determine the installed Deluge version. Quota plugin setup will not proceed."
+            return 1
+            ;;
+    esac
+    quota_tmp=$(mktemp -d) || return 1
+    if ! python3 /etc/swizzin/scripts/deluge.quota.py --build "${quota_tmp}/SwizzinQuota-1.0.egg" >> "$log" 2>&1; then
+        rm -rf "$quota_tmp"
+        echo_error "Could not build the Deluge quota plugin"
+        return 1
+    fi
+    for quota_user in "${users[@]}"; do
+        echo_progress_start "Configuring automatic Deluge disk quota display for ${quota_user}"
+        daemon_active=false
+        web_active=false
+        quota_result=0
+        systemctl is-active --quiet "deluged@${quota_user}" 2> /dev/null && daemon_active=true
+        systemctl is-active --quiet "deluge-web@${quota_user}" 2> /dev/null && web_active=true
+        # Config must not be overwritten by a running daemon when it exits.
+        if [[ $web_active == true ]]; then
+            systemctl stop "deluge-web@${quota_user}" >> "$log" 2>&1 || quota_result=1
+        fi
+        if [[ $daemon_active == true ]]; then
+            systemctl stop "deluged@${quota_user}" >> "$log" 2>&1 || quota_result=1
+        fi
+        if [[ $quota_result == 0 ]]; then
+            install -d -o "$quota_user" -g "$quota_user" "/home/${quota_user}/.config/deluge/plugins" &&
+                install -m 644 -o "$quota_user" -g "$quota_user" "${quota_tmp}/SwizzinQuota-1.0.egg" "/home/${quota_user}/.config/deluge/plugins/" &&
+                runuser -u "$quota_user" -- python3 - --enable "/home/${quota_user}/.config/deluge" < /etc/swizzin/scripts/deluge.quota.py >> "$log" 2>&1 || quota_result=1
+        fi
+        # Restore services even when plugin/config installation fails.
+        if [[ $daemon_active == true ]]; then
+            systemctl start "deluged@${quota_user}" >> "$log" 2>&1 || quota_result=1
+        fi
+        if [[ $web_active == true ]]; then
+            systemctl start "deluge-web@${quota_user}" >> "$log" 2>&1 || quota_result=1
+        fi
+        if [[ $quota_result != 0 ]]; then
+            rm -rf "$quota_tmp"
+            echo_error "Could not configure the Deluge quota plugin for ${quota_user}. See ${log}."
+            return 1
+        fi
+        echo_progress_done
+    done
+    rm -rf "$quota_tmp"
+}
+
 function _configure_deluge_services() {
     local daemon_bin web_bin web_version web_args
     daemon_bin=$(type -P deluged)
