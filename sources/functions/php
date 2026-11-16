@@ -31,3 +31,18 @@ function php_v_from_nginxconf() {
 function php_service_version() {
     echo "$(ls /lib/systemd/system | grep php | grep fpm | sort | tail -1 | grep -o -P '(?<=php).*(?=-fpm)')"
 }
+
+# PHP 8.5 bundles OPcache; Ubuntu 26.04 no longer ships a separate package.
+function php_opcache_package() {
+    if [[ $(_os_codename) != "resolute" ]]; then
+        printf '%s' 'php-opcache'
+    fi
+}
+
+# Bundled OPcache does not have a separate module ini to enable.
+function enable_php_opcache() {
+    local version=$1
+    if [[ -f /etc/php/$version/mods-available/opcache.ini ]]; then
+        phpenmod -v "$version" opcache
+    fi
+}

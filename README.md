@@ -9,7 +9,7 @@
 Please use [Discord](https://discord.gg/bDFqAUF) for all community functions, and [GitHub discussions](https://github.com/swizzin/swizzin/discussions) for feature requests and to raise issues.
 
 ## What is swizzin?
-Swizzin is a light, modular seedbox solution that can be installed on Debian 11/12 or Ubuntu 20.04/22.04/24.04. The QuickBox package repo has been ported over for your installing pleasure, including the panel -- if you so choose!
+Swizzin is a light, modular seedbox solution that can be installed on Debian 11/12 or Ubuntu 20.04/22.04/24.04/26.04. The QuickBox package repo has been ported over for your installing pleasure, including the panel -- if you so choose!
 
 Box has been revamped to reduce and consolidate the amount of commands you need to remember to manage your seedbox. More on this below. In addition to that, additional add-on packages can be installed during installation. No need to wait until the installer finishes! Now with unattended installs!
 
@@ -103,7 +103,9 @@ This briefly restarts active Deluge daemon/WebUI services and preserves existing
 Long-term support branches only:
 
 -   Debian 11/12
--   Ubuntu 20.04/22.04/24.04
+-   Ubuntu 20.04/22.04/24.04/26.04
+
+Ubuntu 26.04 (resolute) support is experimental on this branch. Container checks cover nginx/PHP 8.5, Panel HTTP/stats and Socket.IO polling, qBittorrent WebUI/API, and Deluge WebUI with the storage indicator. qBittorrent 5.3 was built with OS libraries; the default static build pipeline, VM boot/reboot, real disk quota enforcement, and other applications still require validation. Panel browser checks were limited by blocked external asset CDNs.
 
 ## Support and Help
 

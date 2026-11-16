@@ -1,9 +1,12 @@
 #!/bin/bash
 
+#shellcheck source=sources/functions/php
+. /etc/swizzin/sources/functions/php
+
 systemctl stop -q nginx
 
 [[ $(_os_codename) =~ ^(focal|buster|bullseye)$ ]] && geoip="php-geoip" || geoip=""
-APT="nginx-extras nginx libnginx-mod-http-fancyindex ssl-cert php php-cli php-fpm php-dev php-xml php-curl php-xmlrpc php-json php-opcache ${geoip}"
+APT="nginx-extras nginx libnginx-mod-http-fancyindex ssl-cert php php-cli php-fpm php-dev php-xml php-curl php-xmlrpc php-json $(php_opcache_package) ${geoip}"
 apt_remove $APT
 
 LIST='nginx-* php7.0-* php-*'
