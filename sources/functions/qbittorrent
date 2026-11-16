@@ -632,10 +632,9 @@ function build_qbittorrent() {
         curl -s https://github.com/qbittorrent/qBittorrent/commit/91943e4815ae40a273b39432340357a4ce879f3b.patch | git apply -v >> $log 2>&1
     fi
     case $VERSION in
-        5.3.*)
+        4.[1-6].* | 5.[0-3].*)
             echo_info "Enabling automatic user disk quota detection"
-            cp /etc/swizzin/sources/patches/qbittorrent/swizzinquota.h src/base/utils/ &&
-                patch -p1 < /etc/swizzin/sources/patches/qbittorrent/quota-5.3.patch >> "$log" 2>&1 || {
+            python3 /etc/swizzin/sources/patches/qbittorrent/apply-quota.py . >> "$log" 2>&1 || {
                 echo_error "Could not apply the qBittorrent disk quota patch. Setup will not proceed"
                 exit 1
             }

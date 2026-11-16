@@ -68,7 +68,9 @@ bash <(curl -sL git.io/swizzin) --env /path/to/your/env/file/here.env
 
 ### qBittorrent user disk quota
 
-Source builds of qBittorrent 5.3 include automatic Linux user quota detection in the standard WebUI status bar. It displays `Quota: used / limit | Free: remaining` when the process user has a block quota on the default save filesystem, or `Disk: used / total | Free: available` when the quota is unlimited, unavailable, or unsupported. No panel, extra backend, or root privileges are required.
+Source builds of qBittorrent 4.1–5.3 include automatic Linux user quota detection in the standard WebUI status bar. It displays `Quota: used / limit | Free: remaining` when the process user has a block quota on the default save filesystem, or `Disk: used / total | Free: available` when the quota is unlimited, unavailable, or unsupported. No panel, extra backend, or root privileges are required.
+
+Compatibility checks include full builds and WebUI tests of 4.2.5, 4.3.9, 4.4.5, 4.5.5, 4.6.7, 5.0.5, 5.1.4, 5.2.4, and 5.3.0 on Ubuntu 24.04. For 4.1.9.1, the changed C++ modules and JavaScript were checked, but a full runtime test still requires its legacy libtorrent 1.1 toolchain.
 
 The lower nonzero soft/hard block limit is used. Available space never exceeds the physical disk's available space and cannot become negative. Usage includes all files owned by the user on that filesystem. This displays existing user quotas; it does not enable or change quotas, and does not read group/project quotas.
 
@@ -77,7 +79,7 @@ Existing installations need a source rebuild, for example `sudo QBITTORRENT_VERS
 Quota calculation regression test (no root required):
 
 ```bash
-g++ -std=c++20 -Wall -Wextra -Werror -I. tests/test_qbittorrent_quota.cpp -o /tmp/test_qbittorrent_quota
+g++ -std=c++14 -Wall -Wextra -Werror -I. tests/test_qbittorrent_quota.cpp -o /tmp/test_qbittorrent_quota
 /tmp/test_qbittorrent_quota
 ```
 
