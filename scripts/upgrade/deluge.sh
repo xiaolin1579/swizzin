@@ -15,6 +15,8 @@ fi
 #shellcheck source=sources/functions/fpm
 . /etc/swizzin/sources/functions/fpm
 
+users=($(_get_user_list))
+
 whiptail_deluge
 
 case ${DELUGE_VERSION} in
@@ -27,7 +29,6 @@ case ${DELUGE_VERSION} in
         whiptail_deluge_downupgrade
         deluge_version_info
         dver=$(deluged -v | grep deluged | grep -oP '\d+\.\d+\.\d+')
-        users=($(_get_user_list))
         if [[ $dver == 1.3* ]] && [[ $DELUGE_VERSION == master ]]; then
             echo_info "Major version upgrade detected. User-data will be backed-up."
             for u in "${users[@]}"; do

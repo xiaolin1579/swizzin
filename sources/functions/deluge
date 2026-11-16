@@ -351,19 +351,7 @@ function apt_install_deluge() {
 }
 
 function dweb_check() {
-    case $DELUGE_VERSION in
-        2.2.x | 2.1.x | 2.0.x)
-            sed -i 's|ExecStart=.*|ExecStart=/usr/bin/deluge-web -d|g' /etc/systemd/system/deluge-web@.service
-            ;;
-        1.3-stable)
-            sed -i 's|ExecStart=.*|ExecStart=/usr/bin/deluge-web|g' /etc/systemd/system/deluge-web@.service
-            ;;
-        *)
-            echo_error "$DELUGE_VERSION branch not recognized. Setup will now exit"
-            exit 1
-            ;;
-    esac
-    systemctl daemon-reload
+    _configure_deluge_services || exit 1
     dvermajor=$(deluged -v | grep deluged | grep -oP '\d+\.\d+\.\d+' | cut -d. -f1)
     for u in ${users[@]}; do
         localpass=$(grep localclient /home/$u/.config/deluge/auth | cut -d: -f2)
@@ -627,11 +615,24 @@ DHL
     done
 }
 
-function _dservice() {
-    echo_progress_start "Adding systemd service files"
+function _configure_deluge_services() {
+    local daemon_bin web_bin web_version web_args
+    daemon_bin=$(type -P deluged)
+    web_bin=$(type -P deluge-web)
+    if [[ ! -x $daemon_bin || ! -x $web_bin ]]; then
+        echo_error "Deluge executables were not found in PATH. Service configuration will not proceed."
+        return 1
+    fi
+    web_version=$("$web_bin" --version 2>> "$log" | awk '$1 == "deluge-web" {print $2}')
+    case $web_version in
+        1.*) web_args= ;;
+        2.*) web_args=" -d" ;;
+        *)
+            echo_error "Could not determine the installed Deluge WebUI version. Service configuration will not proceed."
+            return 1
+            ;;
+    esac
     if [[ ! -f /etc/systemd/system/deluged@.service ]]; then
-        dvermajor=$(deluged -v | grep deluged | grep -oP '\d+\.\d+\.\d+' | cut -d. -f1)
-        if [[ $dvermajor == 2 ]]; then args=" -d"; fi
         cat > /etc/systemd/system/deluged@.service << DD
 [Unit]
 Description=Deluge Bittorrent Client Daemon
@@ -640,7 +641,7 @@ After=network.target
 [Service]
 Type=simple
 User=%i
-ExecStart=/usr/bin/deluged -d
+ExecStart=${daemon_bin} -d
 Restart=on-failure
 TimeoutStopSec=300
 
@@ -657,7 +658,7 @@ After=network.target
 [Service]
 Type=simple
 User=%i
-ExecStart=/usr/bin/deluge-web${args}
+ExecStart=${web_bin}${web_args}
 TimeoutStopSec=300
 Restart=on-failure
 
@@ -665,6 +666,15 @@ Restart=on-failure
 WantedBy=multi-user.target
 DW
     fi
+    # Existing templates must follow the current installation prefix too.
+    sed -i "s|^ExecStart=.*|ExecStart=${daemon_bin} -d|" /etc/systemd/system/deluged@.service || return 1
+    sed -i "s|^ExecStart=.*|ExecStart=${web_bin}${web_args}|" /etc/systemd/system/deluge-web@.service || return 1
+    systemctl daemon-reload
+}
+
+function _dservice() {
+    echo_progress_start "Adding systemd service files"
+    _configure_deluge_services || exit 1
     for u in "${users[@]}"; do
         systemctl enable -q deluged@${u} 2>&1 | tee -a $log
         systemctl enable -q deluge-web@${u} 2>&1 | tee -a $log
