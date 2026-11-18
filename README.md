@@ -136,6 +136,18 @@ Box functions:
     -   Usage: `box rmgrsec`
 -   rtx - starts the r(u)Torrent extras management interface (`rtx` alone will also do)
     -   Usage: `box rtx` or `rtx`
+-   sso - manages Authelia single sign-on for installed applications
+    -   Usage: `box sso enable sonarr`, `box sso disable sonarr`, `box sso status`
+
+### Single sign-on with Authelia
+
+`box install authelia` installs [Authelia](https://www.authelia.com/) from its official APT repository and puts it behind the existing nginx instance at `https://<your-domain>/authelia`. Users are generated from the normal swizzin user database, so `box adduser`, `box deluser` and `box chpasswd` keep Authelia in sync.
+
+Protect an application with `box sso enable <package>` and remove it again with `box sso disable <package>`. The command edits the app's nginx configuration idempotently, replaces its basic authentication prompt with the Authelia login, and re-applies itself after `box update`.
+
+For Organizr, also enable **Auth Proxy** in its web UI and set the trusted user header to `Remote-User` (plus `Remote-Email`, `Remote-Name` and `Remote-Groups` if desired). Set the logout URL to `https://<your-domain>/authelia/logout` if the version supports it. The nginx side passes those headers automatically.
+
+Keep the native login for qBittorrent, Deluge, Flood, ruTorrent and Transmission: their per-user WebUI accounts are used for the quota display. Plex, Jellyfin, Syncthing and other client-based applications need a bypass or a VPN because their mobile/TV clients cannot complete a browser SSO flow.
 
 
 ## Contributing

@@ -207,6 +207,7 @@ function _help() {
     echo -e "Usage:\t$(basename $0)"
     echo -e "\t$(basename $0) [ install | remove | upgrade ] ${bold}pkg1${normal} [ pkg2 ... ]"
     echo -e "\t$(basename $0) [ adduser | deluser | chpasswd ] ${bold}username${normal} [ password ]"
+    echo -e "\t$(basename $0) sso [ status | enable | disable | reapply | sync ] [ pkg ]"
     echo -e "\t$(basename $0) [ list | update ]"
     echo
     echo -e "Note: Only install and remove functions accept package arguments. List and update must be run without modifiers\n" | fmt --goal=66 --tagged-paragraph
@@ -234,6 +235,10 @@ function _help() {
     printf "${sgformat}" "chpasswd"
     echo -e "The chpasswd function requires a single user to be specified, their password will be changed" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
     echo -e "               Example: box chpasswd forgetfulfriend" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
+    echo
+    printf "${sgformat}" "sso"
+    echo -e "Manage Authelia single sign-on. Use enable/disable with an installed package name." | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
+    echo -e "               Example: box sso enable sonarr" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
     echo
     printf "${sgformat}" "update"
     echo -e "The update command will update your local swizzin repository to the latest version and run important update scripts" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
@@ -353,7 +358,17 @@ SUD
         systemctl reload nginx
     fi
 
+    _authelia_sync
+
     echo_success "User $user created"
+}
+
+# Keeps the Authelia account database in sync with swizzin users.
+function _authelia_sync() {
+    [[ -f /install/.authelia.lock ]] || return 0
+    #shellcheck source=sources/functions/authelia
+    . /etc/swizzin/sources/functions/authelia
+    authelia_sync_users || echo_warn "Could not synchronise the Authelia user database"
 }
 
 function _deluser() {
@@ -425,6 +440,7 @@ function _deluser() {
     rm -rf /home/"${user:?}"
     rm /root/${user}.info
     systemctl reload nginx
+    _authelia_sync
     echo_success "User $user removed"
 }
 
@@ -498,6 +514,7 @@ function _chpasswd() {
             esac
         fi
     done
+    _authelia_sync
     echo_success "Password for $user changed"
     pass=""
     unset pass
@@ -633,6 +650,15 @@ case "$1" in
             exit 1
         fi
         _chpasswd "$@"
+        ;;
+    "sso")
+        if [[ ! -f /install/.authelia.lock ]]; then
+            echo_error "Authelia is not installed. Run: box install authelia"
+            exit 1
+        fi
+        #shellcheck source=sources/functions/authelia
+        . /etc/swizzin/sources/functions/authelia
+        authelia_cli "${@:2}"
         ;;
     "rmgrsec")
         _nukeovh

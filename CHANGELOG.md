@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### New
+- feat: Authelia single sign-on integration (`box install authelia`, `box sso`)
+
 ## [3.15.0] (Feb 12 2026)
 
 ### Removed

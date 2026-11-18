@@ -1,0 +1,647 @@
+#!/usr/bin/env bash
+# Authelia helper functions for swizzin
+#
+# This file is sourced by the authelia installer, remover and the `box sso`
+# command. It intentionally keeps all state outside of /etc/swizzin so that
+# `box update` never has to worry about untracked files inside the repository.
+#
+# State layout:
+#   /var/lib/swizzin/authelia/domain          - configured cookie domain
+#   /var/lib/swizzin/authelia/policy          - one_factor or two_factor
+#   /var/lib/swizzin/authelia/enabled/<app>   - app has SSO enabled
+#   /var/lib/swizzin/authelia/backups/<app>.conf
+#
+# Configuration layout:
+#   /etc/authelia/configuration.yml
+#   /etc/authelia/users_database.yml
+#   /etc/authelia/secrets.env
+#   /var/lib/authelia/db.sqlite3
+
+SWIZ_AUTHELIA_CONFIG="${SWIZ_AUTHELIA_CONFIG:-/etc/authelia/configuration.yml}"
+SWIZ_AUTHELIA_USERS="${SWIZ_AUTHELIA_USERS:-/etc/authelia/users_database.yml}"
+SWIZ_AUTHELIA_SECRETS="${SWIZ_AUTHELIA_SECRETS:-/etc/authelia/secrets.env}"
+SWIZ_AUTHELIA_STORAGE="${SWIZ_AUTHELIA_STORAGE:-/var/lib/authelia}"
+SWIZ_AUTHELIA_STATE="${SWIZ_AUTHELIA_STATE:-/var/lib/swizzin/authelia}"
+SWIZ_AUTHELIA_NGINX_APPS="${SWIZ_AUTHELIA_NGINX_APPS:-/etc/nginx/apps}"
+SWIZ_AUTHELIA_NGINX_SNIPPETS="${SWIZ_AUTHELIA_NGINX_SNIPPETS:-/etc/nginx/snippets}"
+SWIZ_AUTHELIA_SERVICE="${SWIZ_AUTHELIA_SERVICE:-authelia}"
+
+# log is normally exported by `box`; keep these helpers usable standalone.
+if [[ -z ${log:-} ]]; then
+    export log="/root/logs/swizzin.log"
+fi
+
+# Returns true when Authelia has been installed by swizzin.
+function authelia_installed() {
+    [[ -f /install/.authelia.lock ]]
+}
+
+# Prints the configured domain for Authelia.
+function authelia_domain() {
+    if [[ -n ${AUTHELIA_DOMAIN:-} ]]; then
+        printf '%s\n' "$AUTHELIA_DOMAIN"
+        return 0
+    fi
+    if [[ -f $SWIZ_AUTHELIA_STATE/domain ]]; then
+        cat "$SWIZ_AUTHELIA_STATE/domain"
+        return 0
+    fi
+    return 1
+}
+
+# Prints the configured access control policy (one_factor or two_factor).
+function authelia_policy() {
+    if [[ -n ${AUTHELIA_POLICY:-} ]]; then
+        printf '%s\n' "$AUTHELIA_POLICY"
+        return 0
+    fi
+    if [[ -f $SWIZ_AUTHELIA_STATE/policy ]]; then
+        cat "$SWIZ_AUTHELIA_STATE/policy"
+        return 0
+    fi
+    printf 'two_factor\n'
+}
+
+# Prints the public portal URL.
+function authelia_url() {
+    local domain
+    domain=$(authelia_domain) || return 1
+    printf 'https://%s/authelia\n' "$domain"
+}
+
+# Runs the Authelia binary with a clean environment so that `AUTHELIA_*`
+# variables used elsewhere in swizzin are not mistaken for configuration
+# overrides by the Authelia environment loader.
+function _authelia_bin() {
+    local binary
+    binary=$(command -v authelia) || return 1
+    env -i "$binary" "$@"
+}
+
+# Validates a configuration file.
+# $1 = path to configuration.yml
+function authelia_validate_config() {
+    _authelia_bin config validate --config "$1"
+}
+
+# Generates an Argon2id digest in the format expected by the file backend.
+# $1 = plaintext password
+function authelia_hash_password() {
+    local password="$1"
+    local digest
+
+    digest=$(_authelia_bin crypto hash generate argon2 --password "$password" --no-confirm 2> /dev/null |
+        sed -n 's/^Digest: //p')
+    [[ -n $digest ]] || return 1
+    printf '%s\n' "$digest"
+}
+
+# Regenerates /etc/authelia/users_database.yml from swizzin users.
+# Passwords are read from the .info files in /root, exactly like the
+# htpasswd files installed by swizzin.
+function authelia_sync_users() {
+    local domain master user password digest group count tmp_file
+
+    if ! declare -F _get_user_list > /dev/null; then
+        #shellcheck source=sources/functions/users
+        . /etc/swizzin/sources/functions/users
+    fi
+
+    domain=$(authelia_domain) || {
+        echo_error "Authelia domain is not configured, cannot sync users"
+        return 1
+    }
+    master=$(_get_master_username)
+
+    tmp_file=$(mktemp)
+    count=0
+    {
+        printf -- '---\n'
+        printf 'users:\n'
+        while IFS= read -r user; do
+            [[ -z $user ]] && continue
+            password=$(_get_user_password "$user") || {
+                echo_warn "No password stored for ${user}, skipping Authelia account"
+                continue
+            }
+            digest=$(authelia_hash_password "$password") || {
+                echo_warn "Could not hash password for ${user}, skipping Authelia account"
+                continue
+            }
+            if [[ $user == "$master" ]]; then
+                group="admins"
+            else
+                group="users"
+            fi
+            cat << EOF
+  ${user}:
+    displayname: "${user}"
+    password: "${digest}"
+    email: "${user}@${domain}"
+    groups:
+      - "${group}"
+EOF
+            count=$((count + 1))
+        done < <(_get_user_list)
+        if [[ $count -eq 0 ]]; then
+            printf '  {}\n'
+        fi
+    } > "$tmp_file"
+
+    if [[ $count -eq 0 ]]; then
+        echo_error "No Authelia users could be generated"
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    install -m 0640 -o authelia -g authelia "$tmp_file" "$SWIZ_AUTHELIA_USERS"
+    rm -f "$tmp_file"
+    echo_log_only "Wrote ${count} users to ${SWIZ_AUTHELIA_USERS}"
+}
+
+# Creates the three secrets used by Authelia if they do not exist yet.
+# Reusing the values is important: changing them invalidates sessions,
+# encrypted storage and password reset links.
+function authelia_ensure_secrets() {
+    # shellcheck disable=SC1090
+    [[ -f $SWIZ_AUTHELIA_SECRETS ]] && . "$SWIZ_AUTHELIA_SECRETS"
+
+    if [[ -z ${SWIZ_AUTHELIA_SESSION_SECRET:-} ]]; then
+        SWIZ_AUTHELIA_SESSION_SECRET=$(head /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 64)
+    fi
+    if [[ -z ${SWIZ_AUTHELIA_STORAGE_KEY:-} ]]; then
+        SWIZ_AUTHELIA_STORAGE_KEY=$(head /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 64)
+    fi
+    if [[ -z ${SWIZ_AUTHELIA_JWT_SECRET:-} ]]; then
+        SWIZ_AUTHELIA_JWT_SECRET=$(head /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 64)
+    fi
+
+    mkdir -p "$(dirname "$SWIZ_AUTHELIA_SECRETS")"
+    (
+        umask 077
+        cat > "$SWIZ_AUTHELIA_SECRETS" << EOF
+SWIZ_AUTHELIA_SESSION_SECRET='${SWIZ_AUTHELIA_SESSION_SECRET}'
+SWIZ_AUTHELIA_STORAGE_KEY='${SWIZ_AUTHELIA_STORAGE_KEY}'
+SWIZ_AUTHELIA_JWT_SECRET='${SWIZ_AUTHELIA_JWT_SECRET}'
+EOF
+    )
+    chown authelia:authelia "$SWIZ_AUTHELIA_SECRETS" 2> /dev/null || true
+    chmod 0600 "$SWIZ_AUTHELIA_SECRETS"
+}
+
+# Writes a complete configuration.yml.
+# $1 = domain
+# $2 = policy (one_factor or two_factor)
+function authelia_write_config() {
+    local domain="$1" policy="${2:-two_factor}" tmp_file
+
+    authelia_ensure_secrets
+
+    tmp_file=$(mktemp)
+    cat > "$tmp_file" << EOF
+---
+# Managed by swizzin. Local changes will be overwritten by \`box sso\` and
+# reinstalling the package. Put permanent overrides in a separate file.
+theme: 'dark'
+default_2fa_method: 'totp'
+server:
+  address: 'tcp://127.0.0.1:9091/authelia'
+  endpoints:
+    authz:
+      auth-request:
+        implementation: 'AuthRequest'
+log:
+  level: 'info'
+totp:
+  issuer: '${domain}'
+  period: 30
+  skew: 1
+authentication_backend:
+  file:
+    path: '${SWIZ_AUTHELIA_USERS}'
+    password:
+      algorithm: 'argon2'
+      argon2:
+        variant: 'argon2id'
+        iterations: 3
+        memory: 65536
+        parallelism: 4
+        key_length: 32
+        salt_length: 16
+access_control:
+  default_policy: 'deny'
+  rules:
+    - domain: '${domain}'
+      policy: '${policy}'
+session:
+  secret: '${SWIZ_AUTHELIA_SESSION_SECRET}'
+  cookies:
+    - domain: '${domain}'
+      authelia_url: 'https://${domain}/authelia'
+      default_redirection_url: 'https://${domain}/'
+storage:
+  encryption_key: '${SWIZ_AUTHELIA_STORAGE_KEY}'
+  local:
+    path: '${SWIZ_AUTHELIA_STORAGE}/db.sqlite3'
+notifier:
+  filesystem:
+    filename: '${SWIZ_AUTHELIA_STORAGE}/notifications.txt'
+identity_validation:
+  reset_password:
+    jwt_secret: '${SWIZ_AUTHELIA_JWT_SECRET}'
+EOF
+
+    if ! authelia_validate_config "$tmp_file" >> "$log" 2>&1; then
+        echo_error "Authelia configuration failed validation, see ${log}"
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$SWIZ_AUTHELIA_CONFIG")" "$SWIZ_AUTHELIA_STORAGE"
+    install -m 0640 -o authelia -g authelia "$tmp_file" "$SWIZ_AUTHELIA_CONFIG"
+    chown authelia:authelia "$SWIZ_AUTHELIA_STORAGE"
+    chmod 0750 "$SWIZ_AUTHELIA_STORAGE"
+    rm -f "$tmp_file"
+
+    mkdir -p "$SWIZ_AUTHELIA_STATE"
+    printf '%s\n' "$domain" > "$SWIZ_AUTHELIA_STATE/domain"
+    printf '%s\n' "$policy" > "$SWIZ_AUTHELIA_STATE/policy"
+}
+
+# Returns the nginx app config path for $1.
+function authelia_app_config() {
+    printf '%s/%s.conf\n' "$SWIZ_AUTHELIA_NGINX_APPS" "$1"
+}
+
+# Returns true when SSO has been enabled for $1.
+function authelia_app_enabled() {
+    [[ -f "$SWIZ_AUTHELIA_STATE/enabled/$1" ]]
+}
+
+# Finds the line number of the main location block in an nginx app config.
+#
+# $1 = config file
+# $2 = optional path fragment (usually the app name). When empty the first
+#      usable proxy/root location is returned.
+#
+# A suitable block contains proxy_pass, fastcgi_pass or root, is not a
+# redirect-only block, and its location header contains /<path>.
+function _authelia_location_line() {
+    local file="$1" path="${2:-}"
+
+    awk -v path="$path" '
+        function braces(s, c,    n, t) {
+            n = 0
+            t = s
+            while (sub(c, "", t)) {
+                n++
+            }
+            return n
+        }
+        function usable() {
+            if (body !~ /(^|[;{[:space:]])(proxy_pass|fastcgi_pass|root)[[:space:]]/) {
+                return 0
+            }
+            if (body ~ /(^|[;{[:space:]])return[[:space:]]/) {
+                return 0
+            }
+            if (path != "" && header !~ ("/" path "([^A-Za-z0-9_-]|$)")) {
+                return 0
+            }
+            return 1
+        }
+        function evaluate() {
+            if (usable()) {
+                print header_nr
+                found = 1
+                exit
+            }
+        }
+        {
+            if (!inblock) {
+                if ($0 ~ /^[[:space:]]*location[[:space:]]/) {
+                    inblock = 1
+                    header_nr = NR
+                    header = $0
+                    body = $0
+                    depth = braces($0, "{") - braces($0, "}")
+                    if (depth <= 0) {
+                        evaluate()
+                        inblock = 0
+                    }
+                }
+                next
+            }
+            body = body "\n" $0
+            depth += braces($0, "{") - braces($0, "}")
+            if (depth <= 0) {
+                evaluate()
+                inblock = 0
+            }
+        }
+        END {
+            if (!found) {
+                exit 1
+            }
+        }
+    ' "$file"
+}
+
+# Adds authelia-authrequest.conf to the main location of an app.
+# $1 = app name
+# $2 = optional location path override
+function authelia_enable_app() {
+    local app="$1" path="${2:-$1}" file line indent tmp_file snippet
+
+    file=$(authelia_app_config "$app")
+    if [[ ! -f $file ]]; then
+        echo_error "No nginx configuration found for ${app} (${file})"
+        return 1
+    fi
+    if grep -q 'swizzin-sso-begin' "$file"; then
+        echo_info "SSO is already enabled for ${app}"
+        mkdir -p "$SWIZ_AUTHELIA_STATE/enabled"
+        touch "$SWIZ_AUTHELIA_STATE/enabled/$app"
+        return 0
+    fi
+
+    line=$(_authelia_location_line "$file" "$path") ||
+        line=$(_authelia_location_line "$file" "")
+    if [[ -z $line ]]; then
+        echo_error "Could not find a proxy location for ${app} in ${file}"
+        echo_info "Try: box sso enable ${app} --location /custom/path"
+        return 1
+    fi
+
+    indent=$(sed -n "${line}p" "$file" | sed -n 's/^\([[:space:]]*\).*/\1/p')
+    snippet="${SWIZ_AUTHELIA_NGINX_SNIPPETS}/authelia-authrequest.conf"
+
+    mkdir -p "$SWIZ_AUTHELIA_STATE/enabled" "$SWIZ_AUTHELIA_STATE/backups"
+    cp -a "$file" "$SWIZ_AUTHELIA_STATE/backups/${app}.conf"
+
+    # Authelia replaces basic auth, so the original auth_basic directive in the
+    # location has to be removed instead of overridden: nginx refuses duplicate
+    # auth_basic directives. The original line is stored in a comment so that
+    # `box sso disable` can restore it later.
+    tmp_file=$(mktemp)
+    if ! awk -v line="$line" -v indent="${indent}    " -v snippet="$snippet" '
+        function braces(s, c,    n, t) {
+            n = 0
+            t = s
+            while (sub(c, "", t)) {
+                n++
+            }
+            return n
+        }
+        function write_block() {
+            print indent "# swizzin-sso-begin"
+            print indent "include " snippet ";"
+            print indent "auth_basic off;"
+            print indent "# swizzin-sso-original-auth-basic: " (original == "" ? "none" : original)
+            print indent "# swizzin-sso-end"
+        }
+        NR == line {
+            gsub(/\$remote_user/, "$authelia_user")
+            print
+            depth = braces($0, "{") - braces($0, "}")
+            if (depth <= 0) {
+                failed = 1
+                next
+            }
+            inblock = 1
+            next
+        }
+        inblock {
+            if ($0 ~ /^[[:space:]]*auth_basic[[:space:]]/) {
+                original = $0
+                sub(/^[[:space:]]+/, "", original)
+                next
+            }
+            d = braces($0, "{") - braces($0, "}")
+            if (depth + d <= 0) {
+                write_block()
+                inblock = 0
+            }
+            depth += d
+            gsub(/\$remote_user/, "$authelia_user")
+            print
+            next
+        }
+        { print }
+        END {
+            if (failed) {
+                exit 2
+            }
+            if (inblock) {
+                exit 3
+            }
+        }
+    ' "$file" > "$tmp_file"; then
+        rm -f "$tmp_file"
+        cp -a "$SWIZ_AUTHELIA_STATE/backups/${app}.conf" "$file"
+        echo_error "Could not safely edit the ${app} nginx configuration (single-line location?)"
+        return 1
+    fi
+    cat "$tmp_file" > "$file"
+    rm -f "$tmp_file"
+
+    if [[ $app == "organizr" ]]; then
+        authelia_patch_organizr "$file"
+    fi
+
+    touch "$SWIZ_AUTHELIA_STATE/enabled/$app"
+    echo_success "SSO enabled for ${app}"
+}
+
+# Makes Organizr's PHP frontend receive the trusted headers it needs.
+# The Auth Proxy feature in Organizr must still be enabled manually in the UI.
+function authelia_patch_organizr() {
+    local file="$1" line indent tmp_file
+
+    grep -q 'swizzin-sso-php-begin' "$file" && return 0
+    line=$(grep -nF 'location ~ \.php$' "$file" | head -1 | cut -d: -f1)
+    [[ -n $line ]] || {
+        echo_warn "Could not find the PHP location in ${file}; enable Auth Proxy headers manually"
+        return 0
+    }
+
+    indent=$(sed -n "${line}p" "$file" | sed -n 's/^\([[:space:]]*\).*/\1/p')
+    tmp_file=$(mktemp)
+    awk -v line="$line" -v indent="$indent" '
+        NR == line {
+            print
+            print indent "    # swizzin-sso-php-begin"
+            print indent "    fastcgi_param HTTP_REMOTE_USER $authelia_user;"
+            print indent "    fastcgi_param HTTP_REMOTE_EMAIL $authelia_email;"
+            print indent "    fastcgi_param HTTP_REMOTE_NAME $authelia_name;"
+            print indent "    fastcgi_param HTTP_REMOTE_GROUPS $authelia_groups;"
+            print indent "    # swizzin-sso-php-end"
+            next
+        }
+        { print }
+    ' "$file" > "$tmp_file"
+    cat "$tmp_file" > "$file"
+    rm -f "$tmp_file"
+}
+
+# Removes the SSO snippets from an app config.
+# $1 = app name
+function authelia_disable_app() {
+    local app="$1" file original tmp_file
+
+    file=$(authelia_app_config "$app")
+    if [[ ! -f $file ]]; then
+        rm -f "$SWIZ_AUTHELIA_STATE/enabled/$app"
+        echo_warn "No nginx configuration found for ${app}"
+        return 0
+    fi
+
+    original=$(sed -n 's/^[[:space:]]*# swizzin-sso-original-auth-basic:[[:space:]]*//p' "$file" | head -1)
+
+    tmp_file=$(mktemp)
+    awk -v original="$original" '
+        /# swizzin-sso-begin/ {
+            match($0, /^[[:space:]]*/)
+            indent = substr($0, RSTART, RLENGTH)
+            inblock = 1
+            next
+        }
+        inblock && /# swizzin-sso-end/ {
+            if (original != "" && original != "none") {
+                print indent original
+            }
+            inblock = 0
+            next
+        }
+        inblock { next }
+        { print }
+    ' "$file" > "$tmp_file"
+    cat "$tmp_file" > "$file"
+    rm -f "$tmp_file"
+
+    sed -i '/# swizzin-sso-php-begin/,/# swizzin-sso-php-end/d' "$file"
+    # shellcheck disable=SC2016
+    sed -i 's/\$authelia_user/\$remote_user/g' "$file"
+    rm -f "$SWIZ_AUTHELIA_STATE/enabled/$app"
+    echo_success "SSO disabled for ${app}"
+}
+
+# Re-applies SSO to every app that had it enabled. Useful after an app update
+# regenerated its nginx configuration.
+function authelia_reapply() {
+    local app
+
+    if [[ ! -d $SWIZ_AUTHELIA_STATE/enabled ]]; then
+        echo_info "No apps have SSO enabled"
+        return 0
+    fi
+
+    for app in "$SWIZ_AUTHELIA_STATE/enabled"/*; do
+        [[ -e $app ]] || continue
+        app=$(basename "$app")
+        authelia_enable_app "$app" || echo_warn "Could not re-apply SSO for ${app}"
+    done
+}
+
+# Reloads nginx after config changes.
+function authelia_reload_nginx() {
+    [[ ${SWIZ_AUTHELIA_SKIP_SYSTEMCTL:-} == "true" ]] && return 0
+    if ! nginx -t >> "$log" 2>&1; then
+        echo_error "nginx configuration is invalid, not reloading"
+        return 1
+    fi
+    systemctl reload nginx >> "$log" 2>&1 || {
+        echo_error "Could not reload nginx"
+        return 1
+    }
+}
+
+# Entry point for `box sso`.
+function authelia_cli() {
+    local command="${1:-status}" app location force
+
+    case "$command" in
+        status | list)
+            printf 'Domain:  %s\n' "$(authelia_domain 2> /dev/null || printf 'not configured')"
+            printf 'Policy:  %s\n' "$(authelia_policy)"
+            printf 'Portal:  %s\n' "$(authelia_url 2> /dev/null || printf 'not configured')"
+            printf 'Service: %s\n' "$(systemctl is-active "$SWIZ_AUTHELIA_SERVICE" 2> /dev/null || printf 'inactive')"
+            printf 'Enabled apps:\n'
+            if [[ -d $SWIZ_AUTHELIA_STATE/enabled ]]; then
+                find "$SWIZ_AUTHELIA_STATE/enabled" -maxdepth 1 -type f -printf '  %f\n' | sort
+            else
+                printf '  (none)\n'
+            fi
+            ;;
+        enable)
+            shift
+            app="${1:-}"
+            shift || true
+            location=""
+            force="false"
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --location)
+                        location="$2"
+                        shift 2
+                        ;;
+                    --force)
+                        force="true"
+                        shift
+                        ;;
+                    *)
+                        echo_error "Unknown option: $1"
+                        return 1
+                        ;;
+                esac
+            done
+            if [[ -z $app ]]; then
+                echo_error "Usage: box sso enable <app> [--location /path] [--force]"
+                return 1
+            fi
+            if [[ ! -f /install/.${app}.lock ]]; then
+                echo_error "${app} does not appear to be installed"
+                return 1
+            fi
+            case "$app" in
+                qbittorrent | deluge | rutorrent | transmission | flood | jellyfin | plex | emby | syncthing)
+                    if [[ $force != "true" ]]; then
+                        echo_warn "${app} manages its own users or clients. Enabling SSO may break"
+                        echo_warn "per-user quotas, mobile/TV apps or device pairing."
+                        if [[ -t 0 ]] && ! ask "Continue anyway?" N; then
+                            return 1
+                        fi
+                    fi
+                    ;;
+                *) ;;
+            esac
+            authelia_enable_app "$app" "$location" || return 1
+            authelia_reload_nginx || return 1
+            ;;
+        disable)
+            shift
+            app="${1:-}"
+            if [[ -z $app ]]; then
+                echo_error "Usage: box sso disable <app>"
+                return 1
+            fi
+            authelia_disable_app "$app"
+            authelia_reload_nginx || return 1
+            ;;
+        reapply)
+            authelia_reapply
+            authelia_reload_nginx || return 1
+            ;;
+        sync)
+            authelia_sync_users
+            ;;
+        url)
+            authelia_url
+            ;;
+        *)
+            echo_error "Unknown sso command: ${command}"
+            echo_info "Usage: box sso [status|list|enable <app>|disable <app>|reapply|sync|url]"
+            return 1
+            ;;
+    esac
+}

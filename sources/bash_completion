@@ -12,7 +12,7 @@ _command_complete() {
 
     case ${COMP_CWORD} in
         1)
-            mapfile -t COMPREPLY < <(compgen -W "install remove adduser deluser chpasswd update upgrade rtx rmgrsec list help" -- "${cur}")
+            mapfile -t COMPREPLY < <(compgen -W "install remove adduser deluser chpasswd sso update upgrade rtx rmgrsec list help" -- "${cur}")
             ;;
         *)
             case ${sub_cmd} in
@@ -21,6 +21,13 @@ _command_complete() {
                     ;;
                 remove)
                     mapfile -t COMPREPLY < <(compgen -W "$(printf "%s " "${apps_array[@]%.*}")" -- "${cur}")
+                    ;;
+                sso)
+                    if [[ ${COMP_CWORD} -eq 2 ]]; then
+                        mapfile -t COMPREPLY < <(compgen -W "status list enable disable reapply sync url" -- "${cur}")
+                    else
+                        mapfile -t COMPREPLY < <(compgen -W "$(printf "%s " "${apps_array[@]%.*}")" -- "${cur}")
+                    fi
                     ;;
                 upgrade)
                     mapfile -t COMPREPLY < <(compgen -W "$(printf "%s " "${upgrade_array[@]%.*}")" -- "${cur}")
